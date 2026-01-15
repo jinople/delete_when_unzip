@@ -4,17 +4,36 @@ import os
 import sys
 import time
 from robust_split import robust_basename_split
+import logging
+from tqdm import tqdm
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
 file_list = []
+# progress bar to show parts being removed (set in main_unzip)
+pbar_parts = None
+
 def remove_one_chunk():
     '''删除已解压的分段压缩文件'''
-    global file_list
+    global file_list, pbar_parts
     if len(file_list) == 0:
         return
     file = file_list.pop(0)
     if file == 'HEAD':  # 第一次调用，不删除文件，等待下一次调用
+        # Move the HEAD marker off and update progress bar if present
         return
     # print('Removing:{}'.format(file))   # debug
-    os.remove(file)
+    try:
+        os.remove(file)
+        logger.info("Removed volume: %s", file)
+        if pbar_parts is not None:
+            try:
+                pbar_parts.update(1)
+            except Exception:
+                pass
+    except Exception as e_rm:
+        logger.warning("Can NOT remove one chunk %s: %s", file, e_rm)
 
 def run_and_monitor_command(command):
     '''子进程启动外部程序'''
@@ -30,7 +49,7 @@ def run_and_monitor_command(command):
             # print(line, end='')  # 打印所有输出 # debug
             # 检查是否包含 "Extracting from"
             if "Extracting from" in line:
-                # print(f"Found 'Extracting from' in the output: {line.strip()}")# debug
+                # print(f"Found 'Extracting from' in the output: {line.strip()})# debug
                 try:
                     time.sleep(1.)  # 防止part1中仍有内容需要读取
                     remove_one_chunk()
@@ -39,14 +58,13 @@ def run_and_monitor_command(command):
             if "All OK" in line:
                 # print("Finished")   # debug
                 remove_one_chunk()
-    # except Exception as e:    # 在app层处理该错误
-    #     print(f"An error occurred: {e}")
     finally:
         # 等待程序结束
         process.communicate()
 
 def main_unzip(file_path,chunk_size=0,password=None):
     '''在本地流式解压文件，边解压边删除. '''
+    global file_list, pbar_parts
     dir_path,file_basename_zip = os.path.split(file_path)
     if dir_path == '':
         dir_path = './'
@@ -56,7 +74,6 @@ def main_unzip(file_path,chunk_size=0,password=None):
     #     file_folder,_ = os.path.splitext(file_folder)
     if not os.path.exists(os.path.join(dir_path,file_folder)):
         os.makedirs(os.path.join(dir_path,file_folder))
-    global file_list
     file_list = []
     files = os.listdir(dir_path)
     # 筛出file_basename.rar, file_basename.r01, file_basename.part1.rar ...
@@ -73,12 +90,25 @@ def main_unzip(file_path,chunk_size=0,password=None):
             file_list.append(os.path.join(dir_path, file)) # 将按照part1,part2,...顺序排列
     file_list.sort()    # 需按顺序读取
     file_list = ['HEAD']+file_list
+
+    # Setup parts progress bar (number of volumes to remove)
+    try:
+        total_parts = max(0, len(file_list)-1)
+        if total_parts > 0:
+            pbar_parts = tqdm(total=total_parts, desc='Removing parts', unit='parts', leave=True)
+    except Exception:
+        pbar_parts = None
+
     # 使用示例
     # 请替换下面的 'name.exe -option1 xxx' 为你想要执行的命令
     command_to_run = ['./unrar.exe', 'x','-o+', file_path,os.path.join(dir_path,file_folder)]
     if password != None:
         command_to_run = ['./unrar.exe', 'x','-p'+password,'-o+', file_path,os.path.join(dir_path,file_folder)]
-    run_and_monitor_command(command_to_run)
+    try:
+        run_and_monitor_command(command_to_run)
+    finally:
+        if pbar_parts is not None:
+            pbar_parts.close()
 
 if __name__ == '__main__':
     if len(sys.argv) <= 1 or len(sys.argv) >4:

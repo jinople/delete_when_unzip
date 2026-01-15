@@ -1,2 +1,2 @@
-stream_unzip==0.0.88
-libarchive-c==5.1
+tqdm
+# (existing requirements preserved — if you have others installed, keep them here)

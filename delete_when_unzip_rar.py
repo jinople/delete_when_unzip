@@ -4,10 +4,16 @@ import io
 from stream_unzip import stream_unzip
 import sys
 import libarchive as libap
+import logging
+import time
+import hashlib
+from tqdm import tqdm
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 def shift_then_truncate(f,chunk_size=1024):
     '''将文件对象向头部平移chunksize，并保留未被覆盖的后半部分（相当于删除头部chunksize字节）'''
-    # with open(file,'rb+') as f: 
     pointer = chunk_size
     while True:
         f.seek(pointer)
@@ -50,7 +56,7 @@ def chain_streams(streams, buffer_size=io.DEFAULT_BUFFER_SIZE):
 
         def readable(self):
             return True
-        
+            
         def seekable(self):
             return False
 
@@ -66,7 +72,6 @@ def chain_streams(streams, buffer_size=io.DEFAULT_BUFFER_SIZE):
                 else:
                     shift_then_truncate(self.stream,max_length)  # remove used bytes
                 bytes_return = self.stream.read(max_length)
-                # if len(bytes_return) != 0:
                 return bytes_return
             else:
                 return b''
@@ -107,22 +112,33 @@ def unzip_buffer(e,file_root):
         else:
             file_multi_path,basename = os.path.split(file_path_name)
             os.makedirs(file_multi_path,exist_ok=True)
+            md5 = hashlib.md5()
+            written = 0
+            # try to get total size for a per-file progress bar
+            total = getattr(entry, 'size', None)
+            file_pbar = None
+            try:
+                if total and int(total) > 0:
+                    file_pbar = tqdm(total=int(total), unit='B', unit_scale=True, desc=f'Extracting {basename}', leave=False)
+            except Exception:
+                file_pbar = None
             with open(file_path_name, 'wb') as f1:  # 文件
                 for block in entry.get_blocks():
                     f1.write(block)
-                # try:
-                #     for block in entry.get_blocks():
-                #         f1.write(block)
-                # except:
-                #     print('>>>> Get blocks ERROR <<<<')
+                    written += len(block)
+                    md5.update(block)
+                    if file_pbar is not None:
+                        file_pbar.update(len(block))
+                f1.flush()
+            if file_pbar is not None:
+                file_pbar.close()
+            logger.info("Extracted: %s (%d bytes) md5=%s", file_path_name, written, md5.hexdigest())
 
 def generate_open_file_streams(filenames):
     ''' 将多个文件生成文件流迭代器 '''
     count = 1
     for file in filenames:
         with open(file,'rb+') as f:
-            # if len(filenames)>1 and count==1:   # 多分卷
-            #     f.seek(4)
             count+=1
             yield f
             f.close()
@@ -140,11 +156,18 @@ def main_unzip(file_path,chunk_size,password=None):
         fs = chain_streams([fp],chunk_size)
         # if password != None:
         #     password = password.encode()    # 存疑
+        start_time = time.time()
         with libap.stream_reader(fs,passphrase=password) as e:
             unzip_buffer(e,os.path.join(file_oripath,file_folder))
         fp.close()
         if not first_read_flag:
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+                logger.info("Removed original rar/arc: %s", file_path)
+            except Exception as e:
+                logger.warning("Could not remove %s: %s", file_path, e)
+        elapsed = time.time() - start_time
+        logger.info("Finished RAR extraction. Time: %.2fs", elapsed)
     except Exception as err:
         fp.close()
         raise err
